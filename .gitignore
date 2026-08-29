@@ -1,0 +1,12 @@
+cache/
+logs/
+outputs/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+MIA-datasets/
+raw_data/
+*.pkl
+*.pth
+*.bin
+*.csv

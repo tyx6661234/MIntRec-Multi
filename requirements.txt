@@ -1,0 +1,16 @@
+# MIntRec 多方法对比框架依赖(已在新版依赖下验证通过)
+# 安装顺序:先按 README 安装匹配 CUDA 的 PyTorch,再 pip install -r requirements.txt
+transformers>=5.5
+pandas>=3.0
+numpy>=2.0
+scikit-learn>=1.8
+easydict>=1.13
+einops>=0.8
+tqdm>=4.67
+matplotlib>=3.10
+
+# Mamba CUDA 内核:仅 tcs_mamba / ddse 两个方法需要。
+# 安装需要 CUDA 编译环境(nvcc,版本与 torch 的 CUDA 匹配),详见 README 第 4 节;
+# 若只跑 text / misa / mult / mag_bert / dlf 可注释掉下面两行。
+mamba-ssm>=2.3
+causal-conv1d>=1.6
