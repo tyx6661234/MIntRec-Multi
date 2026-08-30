@@ -21,18 +21,18 @@ class Param():
             'padding_loc': 'end',
             'need_aligned': False,
             'eval_monitor': 'f1',
-            'train_batch_size': 64,
-            'eval_batch_size': 64,
-            'test_batch_size': 64,
+            'train_batch_size': 16,
+            'eval_batch_size': 8,
+            'test_batch_size': 8,
             'wait_patience': 8
         }
         return common_parameters
 
     def _get_hyper_parameters(self, args):
         """
-        Hyper-parameters taken from the DDSE paper config (mosi section).
+        Hyper-parameters taken from the DLF paper config (mosi section).
             dst_feature_dim_nheads (list): [0] unified projection dim (d), [1] attention heads.
-            nlevels (int): Transformer encoder layers.
+            nlevels (int): Transformer encoder layers for modality-specific/l_mem encoders.
             conv1d_kernel_size_l/a/v (int): Conv1d kernel width per modality (no padding).
             attn_mask (bool): Whether to apply the causal future mask inside encoders.
         """
@@ -41,7 +41,7 @@ class Param():
             'use_bert': True,
             'use_finetune': True,
             'dst_feature_dim_nheads': [50, 10],
-            'nlevels': 4,
+            'nlevels': 2,
             'attn_dropout': 0.3,
             'attn_dropout_a': 0.2,
             'attn_dropout_v': 0.0,
@@ -49,12 +49,12 @@ class Param():
             'embed_dropout': 0.2,
             'res_dropout': 0.0,
             'output_dropout': 0.5,
-            'text_dropout': 0.1,
+            'text_dropout': 0.5,
             'attn_mask': True,
             'conv1d_kernel_size_l': 5,
             'conv1d_kernel_size_a': 5,
             'conv1d_kernel_size_v': 5,
-            'lr': 0.0001,
+            'lr': 3e-05,
             'grad_clip': 0.6,
         }
         return hyper_parameters

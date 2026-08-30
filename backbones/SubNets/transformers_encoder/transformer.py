@@ -46,6 +46,19 @@ class TransformerEncoder(nn.Module):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
+        self._checkpoint_devices = {}   # device index -> whether checkpointing is enabled on it
+
+    def _checkpoint_enabled(self, device):
+        # Checkpointing trades ~2-3x compute for bounded activation memory, only
+        # worthwhile on small-VRAM GPUs (adaptation for 8GB laptops); skip on large ones.
+        if device.type != 'cuda':
+            return False
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        if idx not in self._checkpoint_devices:
+            total_gb = torch.cuda.get_device_properties(idx).total_memory / 1024 ** 3
+            self._checkpoint_devices[idx] = total_gb < 16
+        return self._checkpoint_devices[idx]
+
     def forward(self, x_in, x_in_k = None, x_in_v = None):
         """
         Args:
@@ -75,16 +88,16 @@ class TransformerEncoder(nn.Module):
             x_k = F.dropout(x_k, p=self.dropout, training=self.training)
             x_v = F.dropout(x_v, p=self.dropout, training=self.training)
         
-        # encoder layers (gradient checkpointing in training to bound activation memory)
+        # encoder layers (gradient checkpointing in training on small-VRAM GPUs)
         intermediates = [x]
         for layer in self.layers:
             if x_in_k is not None and x_in_v is not None:
-                if self.training and torch.is_grad_enabled() and x.requires_grad:
+                if self.training and torch.is_grad_enabled() and x.requires_grad and self._checkpoint_enabled(x.device):
                     x = checkpoint(layer, x, x_k, x_v, use_reentrant=False)
                 else:
                     x = layer(x, x_k, x_v)
             else:
-                if self.training and torch.is_grad_enabled() and x.requires_grad:
+                if self.training and torch.is_grad_enabled() and x.requires_grad and self._checkpoint_enabled(x.device):
                     x = checkpoint(layer, x, use_reentrant=False)
                 else:
                     x = layer(x)

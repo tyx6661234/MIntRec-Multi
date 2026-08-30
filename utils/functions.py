@@ -76,12 +76,14 @@ def load_npy(path, file_name):
 
 def save_model(model, model_dir):
 
-    save_model = model.module if hasattr(model, 'module') else model 
+    save_model = model.module if hasattr(model, 'module') else model
     model_file = os.path.join(model_dir, 'pytorch_model.bin')
     model_config_file = os.path.join(model_dir, 'config.json')
     torch.save(save_model.state_dict(), model_file)
-    with open(model_config_file, "w") as f:
-        f.write(save_model.config.to_json_string())
+    config = getattr(save_model, 'config', None)
+    if config is not None:
+        with open(model_config_file, "w") as f:
+            f.write(config.to_json_string())
 
 def restore_model(model, model_dir):
     output_model_file = os.path.join(model_dir, 'pytorch_model.bin')

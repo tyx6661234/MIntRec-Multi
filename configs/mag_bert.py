@@ -21,9 +21,9 @@ class Param():
             'padding_loc': 'end',
             'need_aligned': True,
             'eval_monitor': 'f1',
-            'train_batch_size': 16,
-            'eval_batch_size': 8,
-            'test_batch_size': 8,
+            'train_batch_size': 64,
+            'eval_batch_size': 64,
+            'test_batch_size': 64,
             'wait_patience': 8
         }
         return common_parameters

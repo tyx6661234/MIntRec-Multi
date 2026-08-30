@@ -5,6 +5,8 @@ from .FusionNets.MULT import MULT
 from .FusionNets.TCS_Mamba import TCS_Mamba
 from .FusionNets.DLF import DLF
 from .FusionNets.DDSE import DDSE
+from .FusionNets.EMOE import EMOE
+from .FusionNets.gsit.GSIT import GSIT
 
 text_backbones_map = {
                     'bert-base-uncased': BERTEncoder
@@ -17,4 +19,6 @@ methods_map = {
     'tcs_mamba': TCS_Mamba,
     'dlf': DLF,
     'ddse': DDSE,
+    'emoe': EMOE,
+    'gsit': GSIT,
 }

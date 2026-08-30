@@ -21,9 +21,9 @@ class Param():
             'padding_loc': 'end',
             'need_aligned': False,
             'eval_monitor': 'f1',
-            'train_batch_size': 64,
-            'eval_batch_size': 64,
-            'test_batch_size': 64,
+            'train_batch_size': 16,
+            'eval_batch_size': 8,
+            'test_batch_size': 8,
             'wait_patience': 8
         }
         return common_parameters
@@ -56,5 +56,6 @@ class Param():
             'conv1d_kernel_size_v': 5,
             'lr': 0.0001,
             'grad_clip': 0.6,
+            'update_epochs': 10,
         }
         return hyper_parameters

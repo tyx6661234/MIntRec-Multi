@@ -5,12 +5,11 @@ from torch import nn, optim
 from utils.functions import restore_model, save_model, EarlyStopping
 from tqdm import trange, tqdm
 from utils.metrics import AverageMeter, Metrics
-from utils.hinge_loss import HingeLoss
 
-__all__ = ['DLF']
+__all__ = ['GSIT']
 
 
-class DLF:
+class GSIT:
 
     def __init__(self, args, data, model):
 
@@ -18,17 +17,27 @@ class DLF:
 
         self.device, self.model = model.device, model.model
 
-        self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr = args.lr)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=args.wait_patience)
+        # Optimizer groups follow the original GSIT trainer: BERT gets a lower
+        # lr (5e-5) with a no-decay split; everything else uses lr_other.
+        backbone = self.model.model
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        bert_params = list(backbone.text_model.named_parameters()) if hasattr(backbone, 'text_model') else []
+        other_params = [p for n, p in backbone.named_parameters() if 'text_model' not in n]
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in bert_params if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay_bert, 'lr': args.lr_bert},
+            {'params': [p for n, p in bert_params if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.lr_bert},
+            {'params': other_params, 'weight_decay': args.weight_decay_other, 'lr': args.lr_other},
+        ]
+        self.optimizer = optim.Adam(optimizer_grouped_parameters)
 
         self.train_dataloader, self.eval_dataloader, self.test_dataloader = \
             data.mm_dataloader['train'], data.mm_dataloader['dev'], data.mm_dataloader['test']
 
         self.args = args
         self.criterion = nn.CrossEntropyLoss()
-        self.cosine = nn.CosineEmbeddingLoss()
         self.metrics = Metrics(args)
-        self.sim_loss = HingeLoss()
 
         if args.train:
             self.best_eval_score = 0
@@ -38,13 +47,12 @@ class DLF:
     def _train(self, args):
 
         early_stopping = EarlyStopping(args)
+        update_epochs = getattr(args, 'update_epochs', 1)
 
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             self.model.train()
             loss_record = AverageMeter()
 
-            # optional gradient accumulation (update_epochs > 1), as in EMOE
-            update_epochs = getattr(args, 'update_epochs', 1)
             left_epochs = update_epochs
             self.optimizer.zero_grad()
 
@@ -58,69 +66,22 @@ class DLF:
                 with torch.set_grad_enabled(True):
 
                     logits = self.model(text_feats, video_feats, audio_feats)
-                    res = self.model.model.aux_outputs
 
-                    # task loss (language-focused head weighted 3x, as in the paper)
-                    loss_task_all = self.criterion(logits, label_ids)
-                    loss_task_l_hetero = self.criterion(res['logits_l_hetero'], label_ids)
-                    loss_task_v_hetero = self.criterion(res['logits_v_hetero'], label_ids)
-                    loss_task_a_hetero = self.criterion(res['logits_a_hetero'], label_ids)
-                    loss_task_c = self.criterion(res['logits_c'], label_ids)
-                    loss_task = 1 * (1 * loss_task_all + 1 * loss_task_c + 3 * loss_task_l_hetero
-                                     + 1 * loss_task_v_hetero + 1 * loss_task_a_hetero)
-
-                    # reconstruction loss L_r
-                    loss_recon = F.mse_loss(res['recon_l'], res['origin_l']) \
-                               + F.mse_loss(res['recon_v'], res['origin_v']) \
-                               + F.mse_loss(res['recon_a'], res['origin_a'])
-
-                    # specific-feature consistency loss L_s
-                    loss_s_sr = F.mse_loss(res['s_l'].permute(1, 2, 0), res['s_l_r']) \
-                              + F.mse_loss(res['s_v'].permute(1, 2, 0), res['s_v_r']) \
-                              + F.mse_loss(res['s_a'].permute(1, 2, 0), res['s_a_r'])
-
-                    # orthogonality loss L_o (reshape(-1, d) always divides)
-                    num = self.model.model.d_l
-                    ort_target = torch.tensor([-1.0], device=self.device)
-                    loss_ort = self.cosine(res['s_l'].reshape(-1, num), res['c_l'].reshape(-1, num), ort_target) \
-                             + self.cosine(res['s_v'].reshape(-1, num), res['c_v'].reshape(-1, num), ort_target) \
-                             + self.cosine(res['s_a'].reshape(-1, num), res['c_a'].reshape(-1, num), ort_target)
-
-                    # triplet margin loss L_m
-                    c_l, c_v, c_a = res['c_l_sim'], res['c_v_sim'], res['c_a_sim']
-                    ids, feats = [], []
-                    for i in range(label_ids.size(0)):
-                        feats.append(c_l[i].view(1, -1))
-                        feats.append(c_v[i].view(1, -1))
-                        feats.append(c_a[i].view(1, -1))
-                        ids.append(label_ids[i].view(1, -1))
-                        ids.append(label_ids[i].view(1, -1))
-                        ids.append(label_ids[i].view(1, -1))
-                    feats = torch.cat(feats, dim=0)
-                    ids = torch.cat(ids, dim=0)
-                    loss_sim = self.sim_loss(ids, feats)
-
-                    # overall loss L_DLF
-                    loss = loss_task + (loss_s_sr + loss_recon + (loss_sim + loss_ort) * 0.1) * 0.1
-
+                    loss = self.criterion(logits, label_ids)
                     loss.backward()
                     loss_record.update(loss.item(), label_ids.size(0))
 
                     left_epochs -= 1
                     if not left_epochs:
-                        if args.grad_clip != -1.0:
-                            nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], args.grad_clip)
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                         left_epochs = update_epochs
 
             if left_epochs != update_epochs:
-                if args.grad_clip != -1.0:
-                    nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], args.grad_clip)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            outputs = self._get_outputs(args, mode = 'eval')
+            outputs = self._get_outputs(args, mode='eval')
             eval_score = outputs[args.eval_monitor]
 
             eval_results = {
@@ -134,7 +95,6 @@ class DLF:
                 self.logger.info("  %s = %s", key, str(eval_results[key]))
 
             early_stopping(eval_score, self.model)
-            self.scheduler.step(outputs['eval_loss'])
 
             if early_stopping.early_stop:
                 self.logger.info(f'EarlyStopping at epoch {epoch + 1}')
@@ -147,7 +107,7 @@ class DLF:
             self.logger.info('Trained models are saved in %s', args.model_output_path)
             save_model(self.model, args.model_output_path)
 
-    def _get_outputs(self, args, mode = 'eval', return_sample_results = False, show_results = False):
+    def _get_outputs(self, args, mode='eval', return_sample_results=False, show_results=False):
 
         if mode == 'eval':
             dataloader = self.eval_dataloader
@@ -158,8 +118,7 @@ class DLF:
 
         self.model.eval()
 
-        total_labels = torch.empty(0,dtype=torch.long).to(self.device)
-        total_preds = torch.empty(0,dtype=torch.long).to(self.device)
+        total_labels = torch.empty(0, dtype=torch.long).to(self.device)
         total_logits = torch.empty((0, args.num_labels)).to(self.device)
 
         loss_record = AverageMeter()
@@ -182,7 +141,7 @@ class DLF:
                 loss_record.update(loss.item(), label_ids.size(0))
 
         total_probs = F.softmax(total_logits.detach(), dim=1)
-        total_maxprobs, total_preds = total_probs.max(dim = 1)
+        _, total_preds = total_probs.max(dim=1)
 
         y_pred = total_preds.cpu().numpy()
         y_true = total_labels.cpu().numpy()
@@ -191,19 +150,13 @@ class DLF:
         outputs.update({'eval_loss': loss_record.avg})
 
         if return_sample_results:
-
-            outputs.update(
-                {
-                    'y_true': y_true,
-                    'y_pred': y_pred
-                }
-            )
+            outputs.update({'y_true': y_true, 'y_pred': y_pred})
 
         return outputs
 
     def _test(self, args):
 
-        test_results = self._get_outputs(args, mode = 'test', return_sample_results=True, show_results = True)
+        test_results = self._get_outputs(args, mode='test', return_sample_results=True, show_results=True)
         test_results['best_eval_score'] = round(self.best_eval_score, 4)
 
         return test_results

@@ -10,3 +10,11 @@ raw_data/
 *.pth
 *.bin
 *.csv
+
+# ZCode 会话工作区
+.zcode/
+
+# 大目录已迁移至数据盘(如 autodl-tmp),仓库内仅保留软链接;
+# gitignore 的目录规则(带 /)不匹配符号链接,这里用裸名规则排除
+outputs
+MIA-datasets

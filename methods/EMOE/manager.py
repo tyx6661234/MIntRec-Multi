@@ -5,12 +5,25 @@ from torch import nn, optim
 from utils.functions import restore_model, save_model, EarlyStopping
 from tqdm import trange, tqdm
 from utils.metrics import AverageMeter, Metrics
-from utils.hinge_loss import HingeLoss
 
-__all__ = ['DLF']
+__all__ = ['EMOE']
 
 
-class DLF:
+def uni_distill(proj1, proj2):
+    # EMOE unimodal distillation: MSE between softmax-normalized projections.
+    prob1 = torch.softmax(proj1, dim=-1)
+    prob2 = torch.softmax(proj2, dim=-1)
+    return torch.mean((prob1 - prob2) ** 2, dim=-1).mean()
+
+
+def entropy_balance(probs):
+    # Negative entropy: minimizing it pushes the router weights toward uniform.
+    probs = torch.clamp(probs, min=1e-9)
+    n = probs.size(1)
+    return torch.mean(n * torch.sum(probs * torch.log(probs), dim=1))
+
+
+class EMOE:
 
     def __init__(self, args, data, model):
 
@@ -18,7 +31,7 @@ class DLF:
 
         self.device, self.model = model.device, model.model
 
-        self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr = args.lr)
+        self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=args.lr)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=args.wait_patience)
 
         self.train_dataloader, self.eval_dataloader, self.test_dataloader = \
@@ -26,25 +39,37 @@ class DLF:
 
         self.args = args
         self.criterion = nn.CrossEntropyLoss()
-        self.cosine = nn.CosineEmbeddingLoss()
         self.metrics = Metrics(args)
-        self.sim_loss = HingeLoss()
 
         if args.train:
             self.best_eval_score = 0
         else:
             self.model = restore_model(self.model, args.model_output_path)
 
+    def _router_supervision(self, res, label_ids):
+        # Per-sample classification error of each unimodal head, as the
+        # classification analogue of EMOE's squared regression error.
+        errors = []
+        for key in ['logits_l', 'logits_v', 'logits_a']:
+            p_true = torch.softmax(res[key], dim=-1).gather(1, label_ids.view(-1, 1)).squeeze(1)
+            errors.append((1.0 - p_true) ** 2)
+        l_err, v_err, a_err = errors
+        s = 1 / (l_err + 0.1) + 1 / (v_err + 0.1) + 1 / (a_err + 0.1)
+        dist = torch.stack([1 / (l_err + 0.1) / s,
+                            1 / (v_err + 0.1) / s,
+                            1 / (a_err + 0.1) / s], dim=1)
+        loss_sim = torch.mean(torch.mean((dist.detach() - res['channel_weight']) ** 2, dim=-1))
+        return loss_sim
+
     def _train(self, args):
 
         early_stopping = EarlyStopping(args)
+        update_epochs = getattr(args, 'update_epochs', 1)
 
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             self.model.train()
             loss_record = AverageMeter()
 
-            # optional gradient accumulation (update_epochs > 1), as in EMOE
-            update_epochs = getattr(args, 'update_epochs', 1)
             left_epochs = update_epochs
             self.optimizer.zero_grad()
 
@@ -59,49 +84,28 @@ class DLF:
 
                     logits = self.model(text_feats, video_feats, audio_feats)
                     res = self.model.model.aux_outputs
+                    w = res['channel_weight']
 
-                    # task loss (language-focused head weighted 3x, as in the paper)
-                    loss_task_all = self.criterion(logits, label_ids)
-                    loss_task_l_hetero = self.criterion(res['logits_l_hetero'], label_ids)
-                    loss_task_v_hetero = self.criterion(res['logits_v_hetero'], label_ids)
-                    loss_task_a_hetero = self.criterion(res['logits_a_hetero'], label_ids)
-                    loss_task_c = self.criterion(res['logits_c'], label_ids)
-                    loss_task = 1 * (1 * loss_task_all + 1 * loss_task_c + 3 * loss_task_l_hetero
-                                     + 1 * loss_task_v_hetero + 1 * loss_task_a_hetero)
+                    # task losses: fused head + unimodal heads
+                    loss_task_m = self.criterion(logits, label_ids)
+                    loss_task_l = self.criterion(res['logits_l'], label_ids)
+                    loss_task_v = self.criterion(res['logits_v'], label_ids)
+                    loss_task_a = self.criterion(res['logits_a'], label_ids)
 
-                    # reconstruction loss L_r
-                    loss_recon = F.mse_loss(res['recon_l'], res['origin_l']) \
-                               + F.mse_loss(res['recon_v'], res['origin_v']) \
-                               + F.mse_loss(res['recon_a'], res['origin_a'])
+                    # router supervision: match weights to inverse per-sample error
+                    loss_sim = self._router_supervision(res, label_ids)
 
-                    # specific-feature consistency loss L_s
-                    loss_s_sr = F.mse_loss(res['s_l'].permute(1, 2, 0), res['s_l_r']) \
-                              + F.mse_loss(res['s_v'].permute(1, 2, 0), res['s_v_r']) \
-                              + F.mse_loss(res['s_a'].permute(1, 2, 0), res['s_a_r'])
+                    # entropy balance on router weights
+                    loss_ety = entropy_balance(w)
 
-                    # orthogonality loss L_o (reshape(-1, d) always divides)
-                    num = self.model.model.d_l
-                    ort_target = torch.tensor([-1.0], device=self.device)
-                    loss_ort = self.cosine(res['s_l'].reshape(-1, num), res['c_l'].reshape(-1, num), ort_target) \
-                             + self.cosine(res['s_v'].reshape(-1, num), res['c_v'].reshape(-1, num), ort_target) \
-                             + self.cosine(res['s_a'].reshape(-1, num), res['c_a'].reshape(-1, num), ort_target)
+                    # unimodal distillation into the fused representation
+                    loss_ud = uni_distill(res['c_proj'],
+                                          (res['l_proj'] * w[:, 0].view(-1, 1)
+                                           + res['v_proj'] * w[:, 1].view(-1, 1)
+                                           + res['a_proj'] * w[:, 2].view(-1, 1)).detach())
 
-                    # triplet margin loss L_m
-                    c_l, c_v, c_a = res['c_l_sim'], res['c_v_sim'], res['c_a_sim']
-                    ids, feats = [], []
-                    for i in range(label_ids.size(0)):
-                        feats.append(c_l[i].view(1, -1))
-                        feats.append(c_v[i].view(1, -1))
-                        feats.append(c_a[i].view(1, -1))
-                        ids.append(label_ids[i].view(1, -1))
-                        ids.append(label_ids[i].view(1, -1))
-                        ids.append(label_ids[i].view(1, -1))
-                    feats = torch.cat(feats, dim=0)
-                    ids = torch.cat(ids, dim=0)
-                    loss_sim = self.sim_loss(ids, feats)
-
-                    # overall loss L_DLF
-                    loss = loss_task + (loss_s_sr + loss_recon + (loss_sim + loss_ort) * 0.1) * 0.1
+                    loss = loss_task_m + (loss_task_l + loss_task_v + loss_task_a) / 3 \
+                         + 0.1 * (loss_ety + 0.1 * loss_sim) + 0.1 * loss_ud
 
                     loss.backward()
                     loss_record.update(loss.item(), label_ids.size(0))
@@ -120,7 +124,7 @@ class DLF:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            outputs = self._get_outputs(args, mode = 'eval')
+            outputs = self._get_outputs(args, mode='eval')
             eval_score = outputs[args.eval_monitor]
 
             eval_results = {
@@ -147,7 +151,7 @@ class DLF:
             self.logger.info('Trained models are saved in %s', args.model_output_path)
             save_model(self.model, args.model_output_path)
 
-    def _get_outputs(self, args, mode = 'eval', return_sample_results = False, show_results = False):
+    def _get_outputs(self, args, mode='eval', return_sample_results=False, show_results=False):
 
         if mode == 'eval':
             dataloader = self.eval_dataloader
@@ -158,8 +162,7 @@ class DLF:
 
         self.model.eval()
 
-        total_labels = torch.empty(0,dtype=torch.long).to(self.device)
-        total_preds = torch.empty(0,dtype=torch.long).to(self.device)
+        total_labels = torch.empty(0, dtype=torch.long).to(self.device)
         total_logits = torch.empty((0, args.num_labels)).to(self.device)
 
         loss_record = AverageMeter()
@@ -182,7 +185,7 @@ class DLF:
                 loss_record.update(loss.item(), label_ids.size(0))
 
         total_probs = F.softmax(total_logits.detach(), dim=1)
-        total_maxprobs, total_preds = total_probs.max(dim = 1)
+        _, total_preds = total_probs.max(dim=1)
 
         y_pred = total_preds.cpu().numpy()
         y_true = total_labels.cpu().numpy()
@@ -191,19 +194,13 @@ class DLF:
         outputs.update({'eval_loss': loss_record.avg})
 
         if return_sample_results:
-
-            outputs.update(
-                {
-                    'y_true': y_true,
-                    'y_pred': y_pred
-                }
-            )
+            outputs.update({'y_true': y_true, 'y_pred': y_pred})
 
         return outputs
 
     def _test(self, args):
 
-        test_results = self._get_outputs(args, mode = 'test', return_sample_results=True, show_results = True)
+        test_results = self._get_outputs(args, mode='test', return_sample_results=True, show_results=True)
         test_results['best_eval_score'] = round(self.best_eval_score, 4)
 
         return test_results
