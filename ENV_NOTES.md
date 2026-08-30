@@ -1,5 +1,8 @@
 # MIntRec 运行环境备注(WSL)
 
+> **状态说明(2026-08-30)**:本文件是 2026-08-29 在 WSL(RTX 5060 Laptop 8GB)上的调试与迁移记录,保留作历史排查参考。
+> 现行安装文档与精确版本表以 [README.md](./README.md) 为准;2026-08-30 起主开发环境已迁移至 AutoDL(RTX 4080 SUPER 32GB,`outputs/` 与 `MIA-datasets/` 迁至数据盘 `/root/autodl-tmp`),下文涉及的 `--num_workers 0` 硬约束、`/mnt/d/...` 路径等仅对旧 WSL 环境有效。
+
 ## Python 环境
 - conda 环境:`mamba`(`/home/tyx/miniconda3/envs/mamba`)
 - 解释器:`/home/tyx/miniconda3/envs/mamba/bin/python`
