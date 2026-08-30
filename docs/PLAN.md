@@ -14,7 +14,7 @@
 | 九方法训练日志动力学分析 | ✅ 完成（见 §3，结论：早停从未失效，100 轮上限从不触发） |
 | 目标二 A/B 对照实验 | ✅ **完成**（08-30 12:31 双链重启，全程 ~4.5h；结果与判定见 §6.1：**DLF 取 B、DDSE 取 A**） |
 | 目标二 二阶微调 | ✅ **完成**（08-30 17:28~21:20 四 run：DLF lr 细扫 2e-5/5e-5、DDSE 累积 8/16；**最终推荐 dlf lr 3e-5、ddse 累积 10**，见 §6.2） |
-| 目标一 EMOE/GsiT 协议净化重跑 | ⏳ 排队（配置已就绪：`emoe_p.py` 已对齐论文 §4；monitor 已从 f1_w 修正回 macro f1） |
+| 目标一 EMOE/GsiT 协议净化重跑 | ✅ **基本完成**（协议重跑 + 受限调参 + 3-seed 定版见 §5：EMOE dp 峰值口径进带、GSIT lr1 贴线；仅 temp seeds 1/2 因关机中断待补） |
 | 目标三 TCS_Mamba 网格搜索 | ⏳ 排队（时间预算按实测重估：~3-6 min/run，见 §7） |
 | 目标四 效率基准 | ⏳ 未启动（`tools/efficiency_bench.py` 待写；README 旧时长表已过时，见 §8） |
 
@@ -161,15 +161,31 @@ $PY run.py --dataset MIntRec --method <method> --data_mode multi-class \
 | `configs/emoe.py` / `emoe_b16.py` | bs64 累积 2 / bs16 累积 10，100 上限 | 已跑过（R2 / R2.5） |
 | `configs/gsit.py` / `gsit_b16.py` | bs64 累积 1（论文等效 batch）/ bs16 累积 4 | 论文只公布特征与 5-seed，未公布超参 |
 
-**行动项**：
-1. **协议净化重跑**（各 ~6 分钟，可双链并行）：
-   - EMOE：`emoe_p.py` × seeds 0/1/2 → `results/full_p_emoe_s{0,1,2}.csv`
-   - GsiT：`gsit.py`（bs64）× seeds 1/2（凑 3 seeds）→ `results/full_bs64_gsit_s{1,2}.csv`
-   - 报 mean±std 与 best；EMOE 额外报 best-of-3 对其峰值口径
-2. **若种子均值仍差 >1.5，做受限超参还原**（每次单变量，dev 判定）：
-   - EMOE：`text_dropout` 0.5→0.3、`temperature` 0.1→0.3、`update_epochs` 10→4
-   - GsiT：`lr_other` 5e-4→1e-4/2e-4（小数据上 5e-4 偏大）、`nlevels` 4→2
-3. **记录不可消除项**：作者私有调参不可得，报告注明"公开信息范围内最忠实复现"。
+**行动项与结果**（2026-08-30 执行）：
+
+1. ✅ **协议净化重跑**（macro 选检查点，seeds 0/1/2）：
+
+   | 方法 | 配置 | 3-seed test acc | 3-seed test F1 | 论文 | 差距（均值口径） |
+   |---|---|---|---|---|---|
+   | EMOE | `emoe_p`（bs16+累积10+50ep+lr1e-4） | 70.34 ± 1.19 | 67.11 ± 0.87 | 72.58 / 70.73 | −2.24 / −3.62 ❌ |
+   | GSIT | `gsit`（bs64+lr_other 5e-4） | 69.97 ± 1.63 | 67.00 ± 1.68 | 72.60 / 69.40 | −2.63 / −2.40 ❌ |
+
+2. ✅ **受限超参还原**（单变量 seed 0 筛选 → 胜者补 seeds 1/2）：
+
+   筛选（seed 0，dev 判定）：EMOE dropout 0.3 / temperature 0.3 / 累积 4 → dev 0.6994 / 0.7063 / 0.6813（基线三种子 dev 均值 0.702）；GSIT lr_other 1e-4 / 2e-4 / nlevels 2 → dev 0.6915 / 0.6977 / 0.6833（基线 0.6756）。**GSIT 的 lr 方向明确胜出，EMOE 的 dp 与 temp 存活、acc4 出局。**
+
+   胜者 3-seed 定版：
+
+   | 配置 | test acc | test F1 | 论文 | 差距（均值口径） | 差距（best 口径） |
+   |---|---|---|---|---|---|
+   | **EMOE `emoe_p_dp`**（dropout 0.3） | **71.61 ± 1.28** | **69.29 ± 1.74** | 72.58 / 70.73 | acc −0.97 ✅ / F1 −1.44 | **acc +0.45 ✅ / F1 −0.14 ✅** |
+   | **GSIT `gsit_lr1`**（lr_other 1e-4） | **71.09 ± 1.15** | **68.39 ± 1.08** | 72.60 / 69.40 | acc −1.51 / F1 −1.01（双双贴线，差 0.01） | acc −0.24 ✅ / F1 +0.19 ✅ |
+
+   EMOE dp 的 best（73.03 / 70.59）按其论文自己的"挑峰值"口径**双双进带、acc 反超论文**；GSIT lr1 按均值口径距验收线仅 0.01/0.01。
+
+3. 🔄 **收尾**：`emoe_p_temp` seeds 1/2 因关机中断（重跑 ~14 分钟，仅作完整性记录）；不可消除项——两方法 MIntRec 私有超参未公开，本表为"公开信息范围内最忠实复现"，GSIT 论文为 5-seed 均值口径（我们 3 seeds）。
+
+**目标一结论**：两方法经协议净化 + 单变量 lr/dropout 还原后，**均达到或逼近论文水平**（EMOE 峰值口径进带、GSIT 贴线）；种子方差 ±1.1~1.7 与 dev/test 背离是 445 条 dev 固有限制，最终对比表报 mean±std + best 双口径。
 
 ---
 
