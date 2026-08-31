@@ -40,6 +40,11 @@ class TCS_Mamba:
             self.model.train()
             loss_record = AverageMeter()
 
+            # optional gradient accumulation (update_epochs > 1), as in DLF / DDSE
+            update_epochs = getattr(args, 'update_epochs', 1)
+            left_epochs = update_epochs
+            self.optimizer.zero_grad()
+
             for step, batch in enumerate(tqdm(self.train_dataloader, desc="Iteration")):
 
                 text_feats = batch['text_feats'].to(self.device)
@@ -68,14 +73,22 @@ class TCS_Mamba:
 
                     loss = loss_cls + args.lambda_rec * loss_recon + args.lambda_ort * loss_orth
 
-                    self.optimizer.zero_grad()
                     loss.backward()
                     loss_record.update(loss.item(), label_ids.size(0))
 
-                    if args.grad_clip != -1.0:
-                        nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], args.grad_clip)
+                    left_epochs -= 1
+                    if not left_epochs:
+                        if args.grad_clip != -1.0:
+                            nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], args.grad_clip)
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        left_epochs = update_epochs
 
-                    self.optimizer.step()
+            if left_epochs != update_epochs:
+                if args.grad_clip != -1.0:
+                    nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], args.grad_clip)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
             outputs = self._get_outputs(args, mode = 'eval')
             eval_score = outputs[args.eval_monitor]
